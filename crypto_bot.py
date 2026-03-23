@@ -1,13 +1,10 @@
 """
-crypto_bot.py — Bot crypto Binance Testnet
-Stratégie : RSI (14) + EMA (9/21) crossover
-Paires : BTC/USDT, ETH/USDT
+crypto_bot.py — Bot crypto Bybit (sans restriction géo)
+Stratégie : RSI (14) + EMA (9/21)
 """
 
 import os
 import time
-import hmac
-import hashlib
 import requests
 import pandas as pd
 import numpy as np
@@ -17,125 +14,83 @@ from database import log_trade, init_db
 
 load_dotenv()
 
-# ─── CONFIG ────────────────────────────────────────────────────────────────────
-BINANCE_TESTNET_BASE = "https://api.binance.com/api"  # API publique — pas de restriction géo
-API_KEY    = os.getenv("BINANCE_API_KEY", "")
-API_SECRET = os.getenv("BINANCE_SECRET", "")
-
+BYBIT_BASE     = "https://api.bybit.com"
 PAIRS          = ["BTCUSDT", "ETHUSDT"]
-INTERVAL       = "15m"         # bougie 15 minutes
+INTERVAL       = "15"
 RSI_PERIOD     = 14
-RSI_OVERSOLD   = 30            # signal ACHAT
-RSI_OVERBOUGHT = 70            # signal VENTE
+RSI_OVERSOLD   = 30
+RSI_OVERBOUGHT = 70
 EMA_FAST       = 9
 EMA_SLOW       = 21
-TRADE_AMOUNT   = 100           # USD par trade (simulation)
-SLEEP_SECONDS  = 60            # vérifie toutes les 60s
+TRADE_AMOUNT   = 100
+SLEEP_SECONDS  = 60
 
-# ─── HELPERS ───────────────────────────────────────────────────────────────────
-
-def _sign(params: dict) -> str:
-    query = "&".join(f"{k}={v}" for k, v in params.items())
-    return hmac.new(API_SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
-
-def get_klines(symbol: str, interval: str = INTERVAL, limit: int = 100) -> pd.DataFrame:
-    url = f"{BINANCE_TESTNET_BASE}/v3/klines"
-    resp = requests.get(url, params={"symbol": symbol, "interval": interval, "limit": limit},
-                        timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+def get_klines(symbol, interval=INTERVAL, limit=100):
+    resp = requests.get(f"{BYBIT_BASE}/v5/market/kline", params={
+        "category": "spot", "symbol": symbol,
+        "interval": interval, "limit": limit,
+    }, timeout=10)
     resp.raise_for_status()
     data = resp.json()
-    df = pd.DataFrame(data, columns=[
-        "open_time","open","high","low","close","volume",
-        "close_time","qav","trades","tbbav","tbqav","ignore"
-    ])
+    if data.get("retCode") != 0:
+        raise Exception(f"Bybit: {data.get('retMsg')}")
+    rows = data["result"]["list"]
+    df = pd.DataFrame(rows, columns=["ts","open","high","low","close","volume","turnover"])
     df["close"] = df["close"].astype(float)
-    df["open"]  = df["open"].astype(float)
-    return df
+    return df.iloc[::-1].reset_index(drop=True)
 
-def calc_rsi(series: pd.Series, period: int = RSI_PERIOD) -> float:
-    delta  = series.diff()
-    gain   = delta.where(delta > 0, 0.0).rolling(period).mean()
-    loss   = (-delta.where(delta < 0, 0.0)).rolling(period).mean()
-    rs     = gain / loss
-    rsi    = 100 - (100 / (1 + rs))
-    return round(float(rsi.iloc[-1]), 2)
+def get_price(symbol):
+    resp = requests.get(f"{BYBIT_BASE}/v5/market/tickers",
+                        params={"category": "spot", "symbol": symbol}, timeout=10)
+    return float(resp.json()["result"]["list"][0]["lastPrice"])
 
-def calc_ema(series: pd.Series, span: int) -> pd.Series:
-    return series.ewm(span=span, adjust=False).mean()
+def calc_rsi(series, period=RSI_PERIOD):
+    delta = series.diff()
+    gain  = delta.where(delta > 0, 0.0).rolling(period).mean()
+    loss  = (-delta.where(delta < 0, 0.0)).rolling(period).mean()
+    return round(float((100 - (100 / (1 + gain / loss))).iloc[-1]), 2)
 
-def get_price(symbol: str) -> float:
-    url  = f"{BINANCE_TESTNET_BASE}/v3/ticker/price"
-    resp = requests.get(url, params={"symbol": symbol},
-                        timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-    resp.raise_for_status()
-    return float(resp.json()["price"])
-
-def place_order(symbol: str, side: str, qty: float) -> dict:
-    """Place un ordre market sur le testnet."""
-    ts     = int(time.time() * 1000)
-    params = {
-        "symbol":    symbol,
-        "side":      side,
-        "type":      "MARKET",
-        "quantity":  round(qty, 6),
-        "timestamp": ts,
-    }
-    params["signature"] = _sign(params)
-    url  = f"{BINANCE_TESTNET_BASE}/v3/order"
-    resp = requests.post(url, params=params,
-                         headers={"X-MBX-APIKEY": API_KEY}, timeout=10)
-    resp.raise_for_status()
-    return resp.json()
-
-# ─── STRATÉGIE ─────────────────────────────────────────────────────────────────
+def calc_ema(series, span):
+    return float(series.ewm(span=span, adjust=False).mean().iloc[-1])
 
 class CryptoBot:
     def __init__(self):
         init_db()
-        self.positions = {p: 0.0 for p in PAIRS}  # qty détenue
+        self.positions  = {p: 0.0 for p in PAIRS}
         self.buy_prices = {p: 0.0 for p in PAIRS}
-        print(f"[CryptoBot] Démarré — paires: {PAIRS}")
+        print(f"[CryptoBot] Démarré — Bybit — paires: {PAIRS}")
 
-    def analyze(self, symbol: str):
-        df      = get_klines(symbol)
-        closes  = df["close"]
-        rsi     = calc_rsi(closes)
-        ema_fast = calc_ema(closes, EMA_FAST).iloc[-1]
-        ema_slow = calc_ema(closes, EMA_SLOW).iloc[-1]
-        price   = closes.iloc[-1]
-
-        signal = "HOLD"
+    def analyze(self, symbol):
+        df       = get_klines(symbol)
+        closes   = df["close"]
+        rsi      = calc_rsi(closes)
+        ema_fast = calc_ema(closes, EMA_FAST)
+        ema_slow = calc_ema(closes, EMA_SLOW)
+        price    = closes.iloc[-1]
+        signal   = "HOLD"
         if rsi < RSI_OVERSOLD and ema_fast > ema_slow:
             signal = "BUY"
         elif rsi > RSI_OVERBOUGHT and ema_fast < ema_slow:
             signal = "SELL"
-
-        print(f"[{symbol}] prix={price:.4f} RSI={rsi} EMA9={ema_fast:.4f} EMA21={ema_slow:.4f} → {signal}")
+        print(f"[{symbol}] prix={price:.4f} RSI={rsi} EMA9={ema_fast:.2f} EMA21={ema_slow:.2f} → {signal}")
         return signal, price, rsi
 
-    def execute(self, symbol: str):
+    def execute(self, symbol):
         try:
             signal, price, rsi = self.analyze(symbol)
-
             if signal == "BUY" and self.positions[symbol] == 0:
                 qty = round(TRADE_AMOUNT / price, 6)
-                # place_order(symbol, "BUY", qty)   # ← décommenter sur testnet réel
                 self.positions[symbol]  = qty
                 self.buy_prices[symbol] = price
-                log_trade("crypto", symbol, "BUY", qty, price,
-                          strategy="RSI+EMA", signal=f"RSI={rsi}")
+                log_trade("crypto", symbol, "BUY", qty, price, strategy="RSI+EMA", signal=f"RSI={rsi}")
                 print(f"  ✅ ACHAT {qty} {symbol} @ {price}")
-
             elif signal == "SELL" and self.positions[symbol] > 0:
-                qty   = self.positions[symbol]
-                # place_order(symbol, "SELL", qty)  # ← décommenter sur testnet réel
-                log_trade("crypto", symbol, "SELL", qty, price,
-                          strategy="RSI+EMA", signal=f"RSI={rsi}")
+                qty = self.positions[symbol]
                 pnl = round((price - self.buy_prices[symbol]) * qty, 4)
+                log_trade("crypto", symbol, "SELL", qty, price, strategy="RSI+EMA", signal=f"RSI={rsi}")
                 print(f"  ✅ VENTE {qty} {symbol} @ {price} | PnL: {pnl:+.4f} USD")
                 self.positions[symbol]  = 0
                 self.buy_prices[symbol] = 0
-
         except Exception as e:
             print(f"  ❌ Erreur {symbol}: {e}")
 
@@ -145,7 +100,6 @@ class CryptoBot:
             for pair in PAIRS:
                 self.execute(pair)
             time.sleep(SLEEP_SECONDS)
-
 
 if __name__ == "__main__":
     CryptoBot().run()
