@@ -22,11 +22,12 @@ RSI_OVERBOUGHT = 70
 EMA_FAST       = 9
 EMA_SLOW       = 21
 TRADE_AMOUNT   = 100
-SLEEP_SECONDS  = 300   # CoinGecko limite les appels — 5 min
+SLEEP_SECONDS  = 600   # CoinGecko gratuit — 10 min entre chaque cycle
 
 def get_klines(coin_id: str, days: int = 3) -> pd.DataFrame:
     resp = requests.get(f"{COINGECKO_BASE}/coins/{coin_id}/market_chart",
         params={"vs_currency": "usd", "days": days, "interval": "hourly"},
+        headers={"User-Agent": "Mozilla/5.0"},
         timeout=15)
     resp.raise_for_status()
     prices = resp.json()["prices"]
@@ -90,7 +91,7 @@ class CryptoBot:
                 self.buy_prices[symbol] = 0
         except Exception as e:
             print(f"  ❌ Erreur {symbol}: {e}")
-        time.sleep(10)  # évite le rate limit entre les 2 paires
+        time.sleep(15)  # 15s entre les 2 paires pour éviter le rate limit
 
     def run(self):
         print("[CryptoBot] Boucle principale démarrée…")
