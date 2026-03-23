@@ -18,7 +18,7 @@ from database import log_trade, init_db
 load_dotenv()
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
-BINANCE_TESTNET_BASE = "https://testnet.binance.vision/api"
+BINANCE_TESTNET_BASE = "https://api.binance.com/api"  # API publique — pas de restriction géo
 API_KEY    = os.getenv("BINANCE_API_KEY", "")
 API_SECRET = os.getenv("BINANCE_SECRET", "")
 
@@ -40,7 +40,8 @@ def _sign(params: dict) -> str:
 
 def get_klines(symbol: str, interval: str = INTERVAL, limit: int = 100) -> pd.DataFrame:
     url = f"{BINANCE_TESTNET_BASE}/v3/klines"
-    resp = requests.get(url, params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=10)
+    resp = requests.get(url, params={"symbol": symbol, "interval": interval, "limit": limit},
+                        timeout=10, headers={"User-Agent": "Mozilla/5.0"})
     resp.raise_for_status()
     data = resp.json()
     df = pd.DataFrame(data, columns=[
@@ -64,7 +65,8 @@ def calc_ema(series: pd.Series, span: int) -> pd.Series:
 
 def get_price(symbol: str) -> float:
     url  = f"{BINANCE_TESTNET_BASE}/v3/ticker/price"
-    resp = requests.get(url, params={"symbol": symbol}, timeout=10)
+    resp = requests.get(url, params={"symbol": symbol},
+                        timeout=10, headers={"User-Agent": "Mozilla/5.0"})
     resp.raise_for_status()
     return float(resp.json()["price"])
 
