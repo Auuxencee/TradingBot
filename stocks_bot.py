@@ -1,8 +1,10 @@
 """
-stocks_bot.py — Bot actions Tech + Défense via Alpaca Paper Trading
-Stratégie : RSI (14) + EMA (9/21) — même logique que crypto_bot
-Actions Tech   : NVDA, MSFT, AAPL, GOOGL
-Actions Défense: LMT, RTX, NOC, GD
+stocks_bot.py — Bot actions diversifié via Alpaca Paper Trading
+Stratégie : RSI seul (plus réactif) + confirmation EMA optionnelle
+Tech    : NVDA, MSFT, AAPL, GOOGL, META, AMD, TSLA, AMZN
+Défense : LMT, RTX, NOC, GD
+Finance : JPM, GS, BRK.B
+Santé   : JNJ, UNH
 """
 
 import os
@@ -15,37 +17,43 @@ from database import log_trade, init_db
 
 load_dotenv()
 
-# ─── CONFIG ────────────────────────────────────────────────────────────────────
-ALPACA_BASE_URL  = "https://paper-api.alpaca.markets"   # Paper trading (simulation)
-# ALPACA_BASE_URL = "https://api.alpaca.markets"        # ← LIVE (décommenter après 1 mois)
-ALPACA_API_KEY   = os.getenv("ALPACA_API_KEY", "")
-ALPACA_SECRET    = os.getenv("ALPACA_SECRET", "")
+ALPACA_BASE_URL = "https://paper-api.alpaca.markets"
+ALPACA_API_KEY  = os.getenv("ALPACA_API_KEY", "")
+ALPACA_SECRET   = os.getenv("ALPACA_SECRET", "")
 
-TECH_STOCKS    = ["NVDA", "MSFT", "AAPL", "GOOGL"]
+TECH_STOCKS    = ["NVDA", "MSFT", "AAPL", "GOOGL", "META", "AMD", "TSLA", "AMZN"]
 DEFENSE_STOCKS = ["LMT", "RTX", "NOC", "GD"]
-ALL_SYMBOLS    = TECH_STOCKS + DEFENSE_STOCKS
+FINANCE_STOCKS = ["JPM", "GS", "BRK.B"]
+HEALTH_STOCKS  = ["JNJ", "UNH"]
+ALL_SYMBOLS    = TECH_STOCKS + DEFENSE_STOCKS + FINANCE_STOCKS + HEALTH_STOCKS
 
-RSI_PERIOD     = 14
-RSI_OVERSOLD   = 30
-RSI_OVERBOUGHT = 70
-EMA_FAST       = 9
-EMA_SLOW       = 21
-TRADE_USD      = 500           # USD par position
-SLEEP_SECONDS  = 120           # vérifie toutes les 2min (marché ouvert uniquement)
+RSI_PERIOD   = 14
+RSI_BUY      = 35   # Seuil achat relevé (était 30 — trop strict)
+RSI_SELL     = 65   # Seuil vente abaissé (était 70 — trop strict)
+EMA_FAST     = 9
+EMA_SLOW     = 21
+TRADE_USD    = 300  # USD par position (diversifié = montants plus petits)
+SLEEP_SEC    = 120
 
 HEADERS = {
     "APCA-API-KEY-ID":     ALPACA_API_KEY,
     "APCA-API-SECRET-KEY": ALPACA_SECRET,
 }
 
-# ─── HELPERS ───────────────────────────────────────────────────────────────────
+CATEGORY = {}
+for s in TECH_STOCKS:    CATEGORY[s] = "TECH   "
+for s in DEFENSE_STOCKS: CATEGORY[s] = "DEFENSE"
+for s in FINANCE_STOCKS: CATEGORY[s] = "FINANCE"
+for s in HEALTH_STOCKS:  CATEGORY[s] = "HEALTH "
 
 def market_is_open() -> bool:
-    resp = requests.get(f"{ALPACA_BASE_URL}/v2/clock", headers=HEADERS, timeout=10)
-    return resp.json().get("is_open", False)
+    try:
+        resp = requests.get(f"{ALPACA_BASE_URL}/v2/clock", headers=HEADERS, timeout=10)
+        return resp.json().get("is_open", False)
+    except:
+        return False
 
 def get_bars(symbol: str, limit: int = 60) -> pd.DataFrame:
-    """Récupère les barres 15min pour un symbole."""
     end   = datetime.utcnow()
     start = end - timedelta(days=5)
     url   = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars"
@@ -65,12 +73,6 @@ def get_bars(symbol: str, limit: int = 60) -> pd.DataFrame:
     df["c"] = df["c"].astype(float)
     return df
 
-def get_price(symbol: str) -> float:
-    url  = f"https://data.alpaca.markets/v2/stocks/{symbol}/quotes/latest"
-    resp = requests.get(url, headers=HEADERS, params={"feed": "iex"}, timeout=10)
-    resp.raise_for_status()
-    return float(resp.json()["quote"]["ap"])  # ask price
-
 def calc_rsi(series: pd.Series, period: int = RSI_PERIOD) -> float:
     delta = series.diff()
     gain  = delta.where(delta > 0, 0.0).rolling(period).mean()
@@ -82,7 +84,6 @@ def calc_ema(series: pd.Series, span: int) -> float:
     return float(series.ewm(span=span, adjust=False).mean().iloc[-1])
 
 def place_order(symbol: str, side: str, qty: int):
-    """Ordre market Alpaca (paper)."""
     data = {"symbol": symbol, "qty": qty, "side": side,
             "type": "market", "time_in_force": "day"}
     resp = requests.post(f"{ALPACA_BASE_URL}/v2/orders",
@@ -91,41 +92,42 @@ def place_order(symbol: str, side: str, qty: int):
     return resp.json()
 
 def get_positions() -> dict:
-    resp = requests.get(f"{ALPACA_BASE_URL}/v2/positions", headers=HEADERS, timeout=10)
-    return {p["symbol"]: float(p["qty"]) for p in resp.json()}
+    try:
+        resp = requests.get(f"{ALPACA_BASE_URL}/v2/positions", headers=HEADERS, timeout=10)
+        return {p["symbol"]: float(p["qty"]) for p in resp.json()}
+    except:
+        return {}
 
-# ─── STRATÉGIE ─────────────────────────────────────────────────────────────────
 
 class StocksBot:
     def __init__(self):
         init_db()
         self.buy_prices = {s: 0.0 for s in ALL_SYMBOLS}
         print(f"[StocksBot] Démarré — {len(ALL_SYMBOLS)} actions")
-        print(f"  Tech   : {TECH_STOCKS}")
-        print(f"  Défense: {DEFENSE_STOCKS}")
-
-    def categorize(self, symbol: str) -> str:
-        return "tech" if symbol in TECH_STOCKS else "defense"
+        print(f"  Tech    : {TECH_STOCKS}")
+        print(f"  Défense : {DEFENSE_STOCKS}")
+        print(f"  Finance : {FINANCE_STOCKS}")
+        print(f"  Santé   : {HEALTH_STOCKS}")
 
     def analyze(self, symbol: str):
         df = get_bars(symbol)
         if df.empty or len(df) < RSI_PERIOD + 5:
             return "HOLD", 0.0, 0.0
-
         closes   = df["c"]
         rsi      = calc_rsi(closes)
         ema_fast = calc_ema(closes, EMA_FAST)
         ema_slow = calc_ema(closes, EMA_SLOW)
         price    = closes.iloc[-1]
 
+        # Stratégie : RSI seul comme signal principal
         signal = "HOLD"
-        if rsi < RSI_OVERSOLD and ema_fast > ema_slow:
+        if rsi < RSI_BUY:
             signal = "BUY"
-        elif rsi > RSI_OVERBOUGHT and ema_fast < ema_slow:
+        elif rsi > RSI_SELL:
             signal = "SELL"
 
-        cat = self.categorize(symbol)
-        print(f"  [{cat.upper():7}] {symbol:5} prix={price:.2f} RSI={rsi} EMA9={ema_fast:.2f} EMA21={ema_slow:.2f} → {signal}")
+        cat = CATEGORY.get(symbol, "OTHER  ")
+        print(f"  [{cat}] {symbol:6} prix={price:.2f} RSI={rsi} → {signal}")
         return signal, price, rsi
 
     def execute(self, symbol: str, positions: dict):
@@ -133,7 +135,6 @@ class StocksBot:
             signal, price, rsi = self.analyze(symbol)
             if price == 0:
                 return
-
             in_position = symbol in positions and positions[symbol] > 0
 
             if signal == "BUY" and not in_position:
@@ -141,7 +142,7 @@ class StocksBot:
                 place_order(symbol, "buy", qty)
                 self.buy_prices[symbol] = price
                 log_trade("stocks", symbol, "BUY", qty, price,
-                          strategy="RSI+EMA", signal=f"RSI={rsi}")
+                          strategy="RSI35", signal=f"RSI={rsi}")
                 print(f"    ✅ ACHAT {qty}x {symbol} @ ${price:.2f}")
 
             elif signal == "SELL" and in_position:
@@ -149,10 +150,9 @@ class StocksBot:
                 place_order(symbol, "sell", qty)
                 pnl = round((price - self.buy_prices[symbol]) * qty, 2)
                 log_trade("stocks", symbol, "SELL", qty, price,
-                          strategy="RSI+EMA", signal=f"RSI={rsi}")
-                print(f"    ✅ VENTE {qty}x {symbol} @ ${price:.2f} | PnL: {pnl:+.2f} USD")
+                          strategy="RSI35", signal=f"RSI={rsi}")
+                print(f"    ✅ VENTE {qty}x {symbol} @ ${price:.2f} | PnL: {pnl:+.2f}$")
                 self.buy_prices[symbol] = 0
-
         except Exception as e:
             print(f"    ❌ Erreur {symbol}: {e}")
 
@@ -163,15 +163,11 @@ class StocksBot:
                 print("[StocksBot] Marché fermé. Attente 5min…")
                 time.sleep(300)
                 continue
-
             print(f"\n[StocksBot] Analyse @ {datetime.utcnow().strftime('%H:%M:%S')} UTC")
             positions = get_positions()
-
             for sym in ALL_SYMBOLS:
                 self.execute(sym, positions)
-
-            time.sleep(SLEEP_SECONDS)
-
+            time.sleep(SLEEP_SEC)
 
 if __name__ == "__main__":
     StocksBot().run()
