@@ -10,7 +10,7 @@ import threading
 import time
 import signal
 import sys
-from datetime import datetime
+from datetime import datetime, UTC
 
 from database import init_db
 from crypto_bot import CryptoBot
@@ -78,7 +78,7 @@ if __name__ == "__main__":
         t.start()
         time.sleep(2)
 
-    print(f"\n[Main] ✅ Tous les bots actifs @ {datetime.utcnow().strftime('%H:%M:%S')} UTC")
+    print(f"\n[Main] ✅ Tous les bots actifs @ {datetime.now(UTC).strftime('%H:%M:%S')} UTC")
     print("[Main] Ctrl+C pour arrêter\n")
 
     # Watchdog — redémarre un thread s'il crashe
