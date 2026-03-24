@@ -10,6 +10,7 @@ import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
 from database import log_trade, init_db
+import telegram_alerts
 
 load_dotenv()
 
@@ -71,6 +72,7 @@ class CryptoBot:
         elif rsi > RSI_OVERBOUGHT and ema_fast < ema_slow:
             signal = "SELL"
         print(f"[{symbol}] prix=${price:,.2f} RSI={rsi} EMA9={ema_fast:.2f} EMA21={ema_slow:.2f} → {signal}")
+        telegram_alerts.update_price(symbol, price)
         return signal, price, rsi
 
     def execute(self, symbol):
