@@ -28,12 +28,14 @@ HEALTH_STOCKS  = ["JNJ", "UNH"]
 ALL_SYMBOLS    = TECH_STOCKS + DEFENSE_STOCKS + FINANCE_STOCKS + HEALTH_STOCKS
 
 RSI_PERIOD   = 14
-RSI_BUY      = 35   # Seuil achat relevé (était 30 — trop strict)
-RSI_SELL     = 65   # Seuil vente abaissé (était 70 — trop strict)
+RSI_BUY      = 35
+RSI_SELL     = 65
 EMA_FAST     = 9
 EMA_SLOW     = 21
-TRADE_USD    = 300  # USD par position (diversifié = montants plus petits)
+TRADE_USD    = 300
 SLEEP_SEC    = 120
+STOP_LOSS    = 0.05   # Vente automatique si -5%
+TAKE_PROFIT  = 0.08   # Vente automatique si +8%
 
 HEADERS = {
     "APCA-API-KEY-ID":     ALPACA_API_KEY,
@@ -119,9 +121,9 @@ class StocksBot:
         ema_slow = calc_ema(closes, EMA_SLOW)
         price    = closes.iloc[-1]
 
-        # Stratégie : RSI seul comme signal principal
+        # Stratégie : RSI + confirmation EMA
         signal = "HOLD"
-        if rsi < RSI_BUY:
+        if rsi < RSI_BUY and ema_fast <= ema_slow * 1.01:  # RSI survendu + pas en tendance haussière forte
             signal = "BUY"
         elif rsi > RSI_SELL:
             signal = "SELL"
@@ -137,6 +139,16 @@ class StocksBot:
                 return
             in_position = symbol in positions and positions[symbol] > 0
 
+            # ── Stop-loss / Take-profit si en position ──────────────
+            if in_position and self.buy_prices[symbol] > 0:
+                pct = (price - self.buy_prices[symbol]) / self.buy_prices[symbol]
+                if pct <= -STOP_LOSS:
+                    signal = "SELL"
+                    print(f"    🛑 STOP-LOSS {symbol} ({pct*100:.1f}%)")
+                elif pct >= TAKE_PROFIT:
+                    signal = "SELL"
+                    print(f"    🎯 TAKE-PROFIT {symbol} (+{pct*100:.1f}%)")
+
             if signal == "BUY" and not in_position:
                 qty = max(1, int(TRADE_USD / price))
                 place_order(symbol, "buy", qty)
@@ -150,7 +162,7 @@ class StocksBot:
                 place_order(symbol, "sell", qty)
                 pnl = round((price - self.buy_prices[symbol]) * qty, 2)
                 log_trade("stocks", symbol, "SELL", qty, price,
-                          strategy="RSI35", signal=f"RSI={rsi}")
+                          strategy="RSI35+SL+TP", signal=f"RSI={rsi}")
                 print(f"    ✅ VENTE {qty}x {symbol} @ ${price:.2f} | PnL: {pnl:+.2f}$")
                 self.buy_prices[symbol] = 0
         except Exception as e:
